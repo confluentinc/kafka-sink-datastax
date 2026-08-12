@@ -62,6 +62,10 @@
                   <exclude>org.apache.kafka:*</exclude>
                   <exclude>org.slf4j:*</exclude>
                   <exclude>ch.qos.logback:*</exclude>
+                  <!-- Confluent Cloud (fully-managed) supplies the converters + Schema Registry
+                       client at runtime. Bundling io.confluent here shadows the platform's copy
+                       and breaks AVRO/JSON_SR/Protobuf at task init (SYSTEM_ERROR). See -slim jar. -->
+                  <exclude>io.confluent:*</exclude>
                 </excludes>
               </artifactSet>
               <filters>
@@ -78,6 +82,8 @@
                     <exclude>META-INF/LICENSE*</exclude>
                     <exclude>META-INF/maven/**</exclude>
                     <exclude>META-INF/ASL*</exclude>
+                    <exclude>io/confluent/**</exclude>
+                    <exclude>META-INF/services/io.confluent.*</exclude>
                   </excludes>
                 </filter>
               </filters>
