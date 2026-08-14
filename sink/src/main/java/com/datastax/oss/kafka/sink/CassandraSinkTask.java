@@ -144,12 +144,20 @@ public class CassandraSinkTask extends SinkTask {
 
       if (driverFailure) {
         log.warn(
-            "Error inserting/updating row for Kafka record {}: {}\n   statement: {}}",
-            record,
+            "Error inserting/updating row for Kafka record from topic {} partition {} offset {}: "
+                + "{}\n   statement: {}",
+            record.topic(),
+            record.kafkaPartition(),
+            record.kafkaOffset(),
             e.getMessage(),
             cql);
       } else {
-        log.warn("Error decoding/mapping Kafka record {}: {}", record, e.getMessage());
+        log.warn(
+            "Error decoding/mapping Kafka record from topic {} partition {} offset {}: {}",
+            record.topic(),
+            record.kafkaPartition(),
+            record.kafkaOffset(),
+            e.getMessage());
       }
     }
 
