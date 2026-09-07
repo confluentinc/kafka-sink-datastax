@@ -23,9 +23,13 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Future;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.connect.sink.ErrantRecordReporter;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTask;
 import org.slf4j.Logger;
@@ -43,6 +47,10 @@ public class CassandraSinkTask extends SinkTask {
   private Map<TopicPartition, OffsetAndMetadata> failureOffsets;
   private final AbstractSinkTask processor = new SinkTaskProcessorImpl();
 
+  // KIP-610 errant record reporter, used to route tolerated write/mapping failures to the DLQ
+  private ErrantRecordReporter reporter;
+  private final Queue<Future<Void>> reportFutures = new ConcurrentLinkedQueue<>();
+
   @Override
   public String version() {
     return processor.version();
@@ -52,6 +60,11 @@ public class CassandraSinkTask extends SinkTask {
   public void start(Map<String, String> props) {
     log.debug("CassandraSinkTask starting with props: {}", props);
     failureOffsets = new ConcurrentHashMap<>();
+    try {
+      reporter = context.errantRecordReporter();
+    } catch (NoSuchMethodError | NoClassDefFoundError e) {
+      reporter = null;
+    }
     processor.start(props);
   }
 
@@ -66,6 +79,22 @@ public class CassandraSinkTask extends SinkTask {
   @Override
   public Map<TopicPartition, OffsetAndMetadata> preCommit(
       Map<TopicPartition, OffsetAndMetadata> currentOffsets) {
+    // Ensure any records reported to the dead-letter queue during this cycle are durable before
+    // their offsets are allowed to advance past them.
+    Future<Void> reportFuture;
+    while ((reportFuture = reportFutures.poll()) != null) {
+      try {
+        reportFuture.get();
+      } catch (InterruptedException ie) {
+        Thread.currentThread().interrupt();
+        throw new RuntimeException("Interrupted while flushing dead-letter-queue reports", ie);
+      } catch (Exception ex) {
+        log.warn(
+            "Failed to confirm a dead-letter-queue report; the record may not have been written "
+                + "to the DLQ",
+            ex);
+      }
+    }
     // Copy all of the failures (which point to the offset that we should retrieve from next time)
     // into currentOffsets.
     currentOffsets.putAll(failureOffsets);
@@ -127,8 +156,11 @@ public class CassandraSinkTask extends SinkTask {
       SinkRecord record = ((KafkaSinkRecordAdapter) abstractRecord).getRecord();
       IgnoreErrorsPolicy ignoreErrors = processor.getInstanceState().getConfig().getIgnoreErrors();
       boolean driverFailure = cql != null;
-      if (ignoreErrors == IgnoreErrorsPolicy.NONE
-          || (ignoreErrors == IgnoreErrorsPolicy.DRIVER && !driverFailure)) {
+      // Whether this failure must halt progress (stall and retry) rather than being tolerated.
+      boolean stall =
+          ignoreErrors == IgnoreErrorsPolicy.NONE
+              || (ignoreErrors == IgnoreErrorsPolicy.DRIVER && !driverFailure);
+      if (stall) {
         TopicPartition topicPartition = new TopicPartition(record.topic(), record.kafkaPartition());
         long currentOffset = Long.MAX_VALUE;
         if (failureOffsets.containsKey(topicPartition)) {
@@ -138,6 +170,9 @@ public class CassandraSinkTask extends SinkTask {
           failureOffsets.put(topicPartition, new OffsetAndMetadata(record.kafkaOffset()));
           context.offset(topicPartition, record.kafkaOffset());
         }
+      } else if (reporter != null) {
+        // Route the record to the DLQ and let its offset advance
+        reportFutures.add(reporter.report(record, e));
       }
 
       failCounter.run();
