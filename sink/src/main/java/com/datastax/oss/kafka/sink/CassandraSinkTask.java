@@ -184,7 +184,7 @@ public class CassandraSinkTask extends SinkTask {
             record.topic(),
             record.kafkaPartition(),
             record.kafkaOffset(),
-            e.getMessage(),
+            e.getClass().getName(),
             cql);
       } else {
         log.warn(
@@ -192,7 +192,7 @@ public class CassandraSinkTask extends SinkTask {
             record.topic(),
             record.kafkaPartition(),
             record.kafkaOffset(),
-            e.getMessage());
+            e.getClass().getName());
       }
     }
 

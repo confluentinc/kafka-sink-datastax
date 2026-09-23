@@ -76,6 +76,13 @@ public class KafkaSinkRecordAdapter implements AbstractSinkRecord {
 
   @Override
   public String toString() {
-    return "KafkaSinkRecordAdapter{" + "record=" + record + '}';
+    // Emit only the record's coordinates instead of complete record
+    return "KafkaSinkRecordAdapter{topic="
+        + record.topic()
+        + ", partition="
+        + record.kafkaPartition()
+        + ", offset="
+        + record.kafkaOffset()
+        + '}';
   }
 }
