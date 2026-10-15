@@ -275,6 +275,13 @@
         <artifactId>aws-java-sdk-core</artifactId>
         <version>${amazonaws.version}</version>
       </dependency>
+      <!-- Pin joda-time to a release with current IANA tzdata: it carries its own tz database
+           (independent of the JDK) and is shaded in transitively via aws-java-sdk-core. -->
+      <dependency>
+        <groupId>joda-time</groupId>
+        <artifactId>joda-time</artifactId>
+        <version>2.14.3</version>
+      </dependency>
       <dependency>
         <groupId>com.azure</groupId>
         <artifactId>azure-identity</artifactId>
