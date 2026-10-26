@@ -1,1 +1,1 @@
-${project.version}
+${connector.plugin.version}
