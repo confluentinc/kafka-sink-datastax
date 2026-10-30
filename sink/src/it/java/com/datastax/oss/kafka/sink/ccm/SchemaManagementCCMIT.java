@@ -207,4 +207,79 @@ class SchemaManagementCCMIT extends EndToEndCCMITBase {
         .hasStackTraceContaining("CREATE TABLE");
     assertThat(tableMetadata(table)).isEmpty();
   }
+
+  private Map<String, String> implicitProperties(String keyspace, String topics) {
+    Map<String, String> extras = new HashMap<>();
+    extras.put("mappingMode", "IMPLICIT");
+    extras.put("keyspace", keyspace);
+    Map<String, String> props =
+        makeConnectorProperties("unused=value", "unused", withCredentials(SUPERUSER, extras));
+    props.remove(String.format("topic.mytopic.%s.unused.mapping", keyspaceName));
+    props.put("topics", topics);
+    return props;
+  }
+
+  @Test
+  void implicit_hands_off_creates_keyspace_and_tables_per_topic() {
+    String keyspace = newKeyspaceName();
+    Map<String, String> props = implicitProperties(keyspace, "orders,orders-v1.raw");
+    props.put("createKeyspace", "true");
+    props.put("keyspaceReplicationFactor", "1");
+    props.put("createTable", "true");
+    conn.start(props);
+
+    Schema keySchema = SchemaBuilder.struct().field("id", Schema.INT64_SCHEMA).build();
+    Schema valueSchema =
+        SchemaBuilder.struct()
+            .field("id", Schema.INT64_SCHEMA)
+            .field("name", Schema.STRING_SCHEMA)
+            .build();
+    runTaskWithRecords(
+        new SinkRecord(
+            "orders",
+            0,
+            keySchema,
+            new Struct(keySchema).put("id", 1L),
+            valueSchema,
+            new Struct(valueSchema).put("id", 1L).put("name", "plain"),
+            1L),
+        new SinkRecord(
+            "orders-v1.raw",
+            0,
+            keySchema,
+            new Struct(keySchema).put("id", 2L),
+            valueSchema,
+            new Struct(valueSchema).put("id", 2L).put("name", "dotted"),
+            2L));
+
+    KeyspaceMetadata created =
+        session.refreshSchema().getKeyspace(CqlIdentifier.fromInternal(keyspace)).get();
+    for (String topic : new String[] {"orders", "orders-v1.raw"}) {
+      TableMetadata table = created.getTable(CqlIdentifier.fromInternal(topic)).get();
+      assertThat(table.getPartitionKey())
+          .extracting(ColumnMetadata::getName)
+          .containsExactly(CqlIdentifier.fromInternal("id"));
+      assertThat(table.getColumns()).hasSize(2);
+    }
+    Row plain = session.execute(String.format("SELECT * FROM %s.orders", keyspace)).one();
+    assertThat(plain.getLong("id")).isEqualTo(1L);
+    assertThat(plain.getString("name")).isEqualTo("plain");
+    Row dotted =
+        session.execute(String.format("SELECT * FROM %s.\"orders-v1.raw\"", keyspace)).one();
+    assertThat(dotted.getLong("id")).isEqualTo(2L);
+    assertThat(dotted.getString("name")).isEqualTo("dotted");
+  }
+
+  @Test
+  void implicit_with_mapping_fails_start() {
+    Map<String, String> props = propertiesFor(keyspaceName, Collections.emptyMap());
+    props.put("mappingMode", "IMPLICIT");
+    props.put("keyspace", keyspaceName);
+    conn.start(props);
+
+    assertThatThrownBy(() -> task.start(conn.taskConfigs(1).get(0)))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining("mapping must not be set when mappingMode=IMPLICIT")
+        .hasMessageContaining("mappingMode=EXPLICIT");
+  }
 }
