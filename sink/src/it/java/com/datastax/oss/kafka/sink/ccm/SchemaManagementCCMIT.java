@@ -19,23 +19,61 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.datastax.oss.common.sink.ConfigException;
+import com.datastax.oss.common.sink.config.AuthenticatorConfig;
+import com.datastax.oss.common.sink.schema.FatalSchemaException;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.cql.Row;
+import com.datastax.oss.driver.api.core.metadata.schema.ColumnMetadata;
 import com.datastax.oss.driver.api.core.metadata.schema.KeyspaceMetadata;
+import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata;
+import com.datastax.oss.driver.api.core.type.DataTypes;
 import com.datastax.oss.dsbulk.tests.ccm.CCMCluster;
+import com.datastax.oss.dsbulk.tests.ccm.annotations.CCMConfig;
+import com.datastax.oss.dsbulk.tests.driver.annotations.SessionConfig;
+import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.kafka.connect.data.Date;
+import org.apache.kafka.connect.data.Decimal;
+import org.apache.kafka.connect.data.Schema;
+import org.apache.kafka.connect.data.SchemaBuilder;
+import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.data.Timestamp;
+import org.apache.kafka.connect.sink.SinkRecord;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
+@CCMConfig(
+  config = {"authenticator:PasswordAuthenticator", "authorizer:CassandraAuthorizer"},
+  jvmArgs = "-Dcassandra.superuser_setup_delay_ms=0"
+)
 @Tag("medium")
 class SchemaManagementCCMIT extends EndToEndCCMITBase {
   private static final AtomicInteger KEYSPACE_COUNTER = new AtomicInteger();
+  private static final AtomicInteger TABLE_COUNTER = new AtomicInteger();
+  private static final String SUPERUSER = "cassandra";
+  private static final String WRITER = "writer";
 
-  SchemaManagementCCMIT(CCMCluster ccm, CqlSession session) {
+  SchemaManagementCCMIT(
+      CCMCluster ccm, @SessionConfig(credentials = {"cassandra", "cassandra"}) CqlSession session) {
     super(ccm, session);
+  }
+
+  private static String newTableName() {
+    return "auto_table_" + TABLE_COUNTER.incrementAndGet();
+  }
+
+  private static Map<String, String> withCredentials(String role, Map<String, String> extras) {
+    Map<String, String> props = new HashMap<>(extras);
+    props.put(AuthenticatorConfig.USERNAME_OPT, role);
+    props.put(AuthenticatorConfig.PASSWORD_OPT, role);
+    return props;
   }
 
   private static String newKeyspaceName() {
@@ -44,7 +82,8 @@ class SchemaManagementCCMIT extends EndToEndCCMITBase {
 
   /** Properties binding mytopic to table "types" in the given keyspace. */
   private Map<String, String> propertiesFor(String keyspace, Map<String, String> extras) {
-    Map<String, String> props = makeConnectorProperties("bigintcol=value.bigint", extras);
+    Map<String, String> props =
+        makeConnectorProperties("bigintcol=value.bigint", withCredentials(SUPERUSER, extras));
     props.remove(String.format("topic.mytopic.%s.types.mapping", keyspaceName));
     props.put(String.format("topic.mytopic.%s.types.mapping", keyspace), "bigintcol=value.bigint");
     return props;
@@ -79,5 +118,93 @@ class SchemaManagementCCMIT extends EndToEndCCMITBase {
         .isInstanceOf(ConfigException.class)
         .hasMessageContaining(String.format("Keyspace %s does not exist.", keyspace));
     assertThat(session.getMetadata().getKeyspace(CqlIdentifier.fromInternal(keyspace))).isEmpty();
+  }
+
+  private Optional<TableMetadata> tableMetadata(String table) {
+    return session
+        .refreshSchema()
+        .getKeyspace(CqlIdentifier.fromInternal(keyspaceName))
+        .flatMap(ks -> ks.getTable(CqlIdentifier.fromInternal(table)));
+  }
+
+  @Test
+  void should_create_table_on_first_record_and_write_it() {
+    String table = newTableName();
+    Map<String, String> extras = new HashMap<>();
+    extras.put("createTable", "true");
+    conn.start(
+        makeConnectorProperties(
+            "id=key, name=value.name, day=value.day, ts=value.ts, amount=value.amount",
+            table,
+            withCredentials(SUPERUSER, extras)));
+
+    Schema valueSchema =
+        SchemaBuilder.struct()
+            .field("name", Schema.STRING_SCHEMA)
+            .field("day", Date.SCHEMA)
+            .field("ts", Timestamp.SCHEMA)
+            .field("amount", Decimal.schema(2))
+            .build();
+    java.util.Date day = Date.toLogical(Date.SCHEMA, 19000);
+    java.util.Date ts = new java.util.Date(1_700_000_000_123L);
+    BigDecimal amount = new BigDecimal("12.34");
+    Struct value =
+        new Struct(valueSchema)
+            .put("name", "widget")
+            .put("day", day)
+            .put("ts", ts)
+            .put("amount", amount);
+    runTaskWithRecords(
+        new SinkRecord("mytopic", 0, Schema.INT64_SCHEMA, 42L, valueSchema, value, 1234L));
+
+    TableMetadata created = tableMetadata(table).get();
+    assertThat(created.getPartitionKey())
+        .extracting(ColumnMetadata::getName)
+        .containsExactly(CqlIdentifier.fromInternal("id"));
+    assertThat(created.getColumn("id").get().getType()).isEqualTo(DataTypes.BIGINT);
+    assertThat(created.getColumn("name").get().getType()).isEqualTo(DataTypes.TEXT);
+    assertThat(created.getColumn("day").get().getType()).isEqualTo(DataTypes.DATE);
+    assertThat(created.getColumn("ts").get().getType()).isEqualTo(DataTypes.TIMESTAMP);
+    assertThat(created.getColumn("amount").get().getType()).isEqualTo(DataTypes.DECIMAL);
+
+    Row row = session.execute("SELECT * FROM " + table).one();
+    assertThat(row.getLong("id")).isEqualTo(42L);
+    assertThat(row.getString("name")).isEqualTo("widget");
+    assertThat(row.getLocalDate("day")).isEqualTo(LocalDate.ofEpochDay(19000));
+    assertThat(row.getInstant("ts")).isEqualTo(ts.toInstant());
+    assertThat(row.getBigDecimal("amount")).isEqualTo(amount);
+  }
+
+  @Test
+  void should_fail_task_on_privilege_error_under_ignore_errors_all() {
+    String keyspace = CqlIdentifier.fromInternal(keyspaceName).asCql(true);
+    session.execute(
+        String.format(
+            "CREATE ROLE IF NOT EXISTS %s WITH PASSWORD = '%s' AND LOGIN = true", WRITER, WRITER));
+    session.execute(String.format("GRANT SELECT ON KEYSPACE %s TO %s", keyspace, WRITER));
+    session.execute(String.format("GRANT MODIFY ON KEYSPACE %s TO %s", keyspace, WRITER));
+    String table = newTableName();
+    Map<String, String> extras = new HashMap<>();
+    extras.put("createTable", "true");
+    extras.put("ignoreErrors", "All");
+    conn.start(
+        makeConnectorProperties("id=key, name=value.name", table, withCredentials(WRITER, extras)));
+
+    Schema valueSchema = SchemaBuilder.struct().field("name", Schema.STRING_SCHEMA).build();
+    SinkRecord record =
+        new SinkRecord(
+            "mytopic",
+            0,
+            Schema.INT64_SCHEMA,
+            1L,
+            valueSchema,
+            new Struct(valueSchema).put("name", "widget"),
+            1234L);
+
+    assertThatThrownBy(() -> runTaskWithRecords(record))
+        .isInstanceOf(CompletionException.class)
+        .hasCauseInstanceOf(FatalSchemaException.class)
+        .hasStackTraceContaining("CREATE TABLE");
+    assertThat(tableMetadata(table)).isEmpty();
   }
 }
