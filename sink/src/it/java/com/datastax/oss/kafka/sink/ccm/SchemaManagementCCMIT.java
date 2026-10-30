@@ -17,6 +17,7 @@ package com.datastax.oss.kafka.sink.ccm;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
 
 import com.datastax.oss.common.sink.ConfigException;
 import com.datastax.oss.common.sink.config.AuthenticatorConfig;
@@ -31,6 +32,7 @@ import com.datastax.oss.driver.api.core.type.DataTypes;
 import com.datastax.oss.dsbulk.tests.ccm.CCMCluster;
 import com.datastax.oss.dsbulk.tests.ccm.annotations.CCMConfig;
 import com.datastax.oss.dsbulk.tests.driver.annotations.SessionConfig;
+import com.datastax.oss.kafka.sink.CassandraSinkTask;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.Collections;
@@ -38,6 +40,11 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.Decimal;
@@ -46,6 +53,7 @@ import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.sink.SinkRecord;
+import org.apache.kafka.connect.sink.SinkTaskContext;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
@@ -281,5 +289,95 @@ class SchemaManagementCCMIT extends EndToEndCCMITBase {
         .isInstanceOf(ConfigException.class)
         .hasMessageContaining("mapping must not be set when mappingMode=IMPLICIT")
         .hasMessageContaining("mappingMode=EXPLICIT");
+  }
+
+  private Map<String, String> evolvingProperties(String topic) {
+    Map<String, String> props = implicitProperties(keyspaceName, topic);
+    props.put("createTable", "true");
+    props.put("evolveTable", "true");
+    return props;
+  }
+
+  private static Schema evolveKeySchema() {
+    return SchemaBuilder.struct().field("id", Schema.INT64_SCHEMA).build();
+  }
+
+  private static Schema evolveValueSchema(boolean withEmail) {
+    SchemaBuilder builder =
+        SchemaBuilder.struct().field("id", Schema.INT64_SCHEMA).field("name", Schema.STRING_SCHEMA);
+    if (withEmail) {
+      builder.field("email", Schema.OPTIONAL_STRING_SCHEMA);
+    }
+    return builder.build();
+  }
+
+  private static SinkRecord evolveRecord(String topic, long id, Schema valueSchema) {
+    Schema keySchema = evolveKeySchema();
+    Struct value = new Struct(valueSchema).put("id", id).put("name", "n" + id);
+    if (valueSchema.field("email") != null) {
+      value.put("email", id + "@example.com");
+    }
+    return new SinkRecord(
+        topic, 0, keySchema, new Struct(keySchema).put("id", id), valueSchema, value, id);
+  }
+
+  private Row rowById(String table, long id) {
+    return session.execute(String.format("SELECT * FROM %s WHERE id = %d", table, id)).one();
+  }
+
+  @Test
+  void should_evolve_mid_stream() {
+    String topic = newTableName();
+    conn.start(evolvingProperties(topic));
+
+    runTaskWithRecords(evolveRecord(topic, 1L, evolveValueSchema(false)));
+    task.put(Collections.singletonList(evolveRecord(topic, 2L, evolveValueSchema(true))));
+
+    assertThat(tableMetadata(topic).get().getColumn("email").get().getType())
+        .isEqualTo(DataTypes.TEXT);
+    assertThat(rowById(topic, 1L).isNull("email")).isTrue();
+    assertThat(rowById(topic, 2L).getString("email")).isEqualTo("2@example.com");
+  }
+
+  @Test
+  void two_tasks_evolve_same_table_without_failures() throws Exception {
+    String topic = newTableName();
+    conn.start(evolvingProperties(topic));
+    runTaskWithRecords(evolveRecord(topic, 1L, evolveValueSchema(false)));
+    CassandraSinkTask second = new CassandraSinkTask();
+    second.initialize(mock(SinkTaskContext.class));
+    second.start(conn.taskConfigs(2).get(1));
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    try {
+      CountDownLatch start = new CountDownLatch(1);
+      // Each task has its own, equal v2 schema instance, as with per-task converters.
+      Future<?> first =
+          executor.submit(
+              () -> {
+                start.await();
+                task.put(
+                    Collections.singletonList(evolveRecord(topic, 2L, evolveValueSchema(true))));
+                return null;
+              });
+      Future<?> other =
+          executor.submit(
+              () -> {
+                start.await();
+                second.put(
+                    Collections.singletonList(evolveRecord(topic, 3L, evolveValueSchema(true))));
+                return null;
+              });
+      start.countDown();
+      first.get(60, TimeUnit.SECONDS);
+      other.get(60, TimeUnit.SECONDS);
+    } finally {
+      executor.shutdownNow();
+      second.stop();
+    }
+
+    assertThat(tableMetadata(topic).get().getColumn("email").get().getType())
+        .isEqualTo(DataTypes.TEXT);
+    assertThat(rowById(topic, 2L).getString("email")).isEqualTo("2@example.com");
+    assertThat(rowById(topic, 3L).getString("email")).isEqualTo("3@example.com");
   }
 }

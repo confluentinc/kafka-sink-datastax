@@ -75,4 +75,24 @@ class KafkaSchemaTest {
     assertThat(adapter.keySchema()).isNull();
     assertThat(adapter.valueSchema()).isNull();
   }
+
+  @Test
+  void adapter_should_return_null_identities_for_schemaless_records() {
+    KafkaSinkRecordAdapter adapter =
+        new KafkaSinkRecordAdapter(new SinkRecord("t", 0, null, "k", null, "v", 0));
+    assertThat(adapter.keySchemaIdentity()).isNull();
+    assertThat(adapter.valueSchemaIdentity()).isNull();
+  }
+
+  @Test
+  void adapter_should_expose_raw_schemas_as_identities() {
+    Schema s = SchemaBuilder.struct().field("a", Schema.STRING_SCHEMA).build();
+    KafkaSinkRecordAdapter adapter =
+        new KafkaSinkRecordAdapter(
+            new SinkRecord("t", 0, Schema.INT64_SCHEMA, 1L, s, new Struct(s).put("a", "x"), 0));
+    assertThat(adapter.keySchemaIdentity()).isSameAs(Schema.INT64_SCHEMA);
+    assertThat(adapter.valueSchemaIdentity())
+        .isSameAs(s)
+        .isSameAs(adapter.valueSchema().schemaIdentity());
+  }
 }

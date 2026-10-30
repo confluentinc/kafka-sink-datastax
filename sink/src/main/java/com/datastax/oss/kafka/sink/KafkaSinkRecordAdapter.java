@@ -76,6 +76,16 @@ public class KafkaSinkRecordAdapter implements AbstractSinkRecord {
   }
 
   @Override
+  public Object keySchemaIdentity() {
+    return record.keySchema();
+  }
+
+  @Override
+  public Object valueSchemaIdentity() {
+    return record.valueSchema();
+  }
+
+  @Override
   public Long timestamp() {
     return record.timestamp();
   }
