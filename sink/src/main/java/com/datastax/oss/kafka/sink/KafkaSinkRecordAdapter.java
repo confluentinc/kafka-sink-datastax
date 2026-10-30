@@ -15,6 +15,7 @@
  */
 package com.datastax.oss.kafka.sink;
 
+import com.datastax.oss.common.sink.AbstractSchema;
 import com.datastax.oss.common.sink.AbstractSinkRecord;
 import com.datastax.oss.common.sink.AbstractSinkRecordHeader;
 import java.util.ArrayList;
@@ -62,6 +63,16 @@ public class KafkaSinkRecordAdapter implements AbstractSinkRecord {
   @Override
   public Object value() {
     return KafkaStruct.wrap(record.value());
+  }
+
+  @Override
+  public AbstractSchema keySchema() {
+    return record.keySchema() == null ? null : KafkaSchema.of(record.keySchema());
+  }
+
+  @Override
+  public AbstractSchema valueSchema() {
+    return record.valueSchema() == null ? null : KafkaSchema.of(record.valueSchema());
   }
 
   @Override
