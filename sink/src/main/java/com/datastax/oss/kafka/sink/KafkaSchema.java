@@ -108,11 +108,6 @@ public class KafkaSchema implements AbstractSchema {
   }
 
   @Override
-  public Object schemaIdentity() {
-    return schema;
-  }
-
-  @Override
   public Type type() {
     return type;
   }

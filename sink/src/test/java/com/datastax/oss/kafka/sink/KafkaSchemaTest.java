@@ -52,13 +52,6 @@ class KafkaSchemaTest {
   }
 
   @Test
-  void should_expose_underlying_schema_as_identity() {
-    Schema s = SchemaBuilder.struct().field("a", Schema.STRING_SCHEMA).build();
-    assertThat(KafkaSchema.of(s).schemaIdentity()).isSameAs(KafkaSchema.of(s).schemaIdentity());
-    assertThat(KafkaSchema.of(s).schemaIdentity()).isSameAs(s);
-  }
-
-  @Test
   void adapter_should_expose_key_and_value_schemas() {
     Schema s = SchemaBuilder.struct().field("a", Schema.STRING_SCHEMA).build();
     Struct value = new Struct(s).put("a", "x");
@@ -91,8 +84,6 @@ class KafkaSchemaTest {
         new KafkaSinkRecordAdapter(
             new SinkRecord("t", 0, Schema.INT64_SCHEMA, 1L, s, new Struct(s).put("a", "x"), 0));
     assertThat(adapter.keySchemaIdentity()).isSameAs(Schema.INT64_SCHEMA);
-    assertThat(adapter.valueSchemaIdentity())
-        .isSameAs(s)
-        .isSameAs(adapter.valueSchema().schemaIdentity());
+    assertThat(adapter.valueSchemaIdentity()).isSameAs(s);
   }
 }
