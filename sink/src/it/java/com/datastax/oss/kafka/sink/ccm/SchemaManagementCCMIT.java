@@ -230,7 +230,7 @@ class SchemaManagementCCMIT extends EndToEndCCMITBase {
   @Test
   void implicit_hands_off_creates_keyspace_and_tables_per_topic() {
     String keyspace = newKeyspaceName();
-    Map<String, String> props = implicitProperties(keyspace, "orders,orders-v1.raw");
+    Map<String, String> props = implicitProperties(keyspace, "orders,Payments");
     props.put("createKeyspace", "true");
     props.put("keyspaceReplicationFactor", "1");
     props.put("createTable", "true");
@@ -240,7 +240,7 @@ class SchemaManagementCCMIT extends EndToEndCCMITBase {
     Schema valueSchema =
         SchemaBuilder.struct()
             .field("id", Schema.INT64_SCHEMA)
-            .field("name", Schema.STRING_SCHEMA)
+            .field("customerName", Schema.STRING_SCHEMA)
             .build();
     runTaskWithRecords(
         new SinkRecord(
@@ -249,33 +249,35 @@ class SchemaManagementCCMIT extends EndToEndCCMITBase {
             keySchema,
             new Struct(keySchema).put("id", 1L),
             valueSchema,
-            new Struct(valueSchema).put("id", 1L).put("name", "plain"),
+            new Struct(valueSchema).put("id", 1L).put("customerName", "first"),
             1L),
         new SinkRecord(
-            "orders-v1.raw",
+            "Payments",
             0,
             keySchema,
             new Struct(keySchema).put("id", 2L),
             valueSchema,
-            new Struct(valueSchema).put("id", 2L).put("name", "dotted"),
+            new Struct(valueSchema).put("id", 2L).put("customerName", "second"),
             2L));
 
+    // Unquoted CQL naming: table and column names are lower-cased.
     KeyspaceMetadata created =
         session.refreshSchema().getKeyspace(CqlIdentifier.fromInternal(keyspace)).get();
-    for (String topic : new String[] {"orders", "orders-v1.raw"}) {
-      TableMetadata table = created.getTable(CqlIdentifier.fromInternal(topic)).get();
-      assertThat(table.getPartitionKey())
+    for (String table : new String[] {"orders", "payments"}) {
+      TableMetadata metadata = created.getTable(CqlIdentifier.fromInternal(table)).get();
+      assertThat(metadata.getPartitionKey())
           .extracting(ColumnMetadata::getName)
           .containsExactly(CqlIdentifier.fromInternal("id"));
-      assertThat(table.getColumns()).hasSize(2);
+      assertThat(metadata.getColumns())
+          .containsOnlyKeys(
+              CqlIdentifier.fromInternal("id"), CqlIdentifier.fromInternal("customername"));
     }
-    Row plain = session.execute(String.format("SELECT * FROM %s.orders", keyspace)).one();
-    assertThat(plain.getLong("id")).isEqualTo(1L);
-    assertThat(plain.getString("name")).isEqualTo("plain");
-    Row dotted =
-        session.execute(String.format("SELECT * FROM %s.\"orders-v1.raw\"", keyspace)).one();
-    assertThat(dotted.getLong("id")).isEqualTo(2L);
-    assertThat(dotted.getString("name")).isEqualTo("dotted");
+    Row first = session.execute(String.format("SELECT * FROM %s.orders", keyspace)).one();
+    assertThat(first.getLong("id")).isEqualTo(1L);
+    assertThat(first.getString("customername")).isEqualTo("first");
+    Row second = session.execute(String.format("SELECT * FROM %s.payments", keyspace)).one();
+    assertThat(second.getLong("id")).isEqualTo(2L);
+    assertThat(second.getString("customername")).isEqualTo("second");
   }
 
   @Test
