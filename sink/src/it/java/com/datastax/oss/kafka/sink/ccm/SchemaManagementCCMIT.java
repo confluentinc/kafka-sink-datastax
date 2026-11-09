@@ -341,6 +341,82 @@ class SchemaManagementCCMIT extends EndToEndCCMITBase {
     assertThat(rowById(topic, 2L).getString("email")).isEqualTo("2@example.com");
   }
 
+  private static SinkRecord tombstone(String topic, long id) {
+    Schema keySchema = evolveKeySchema();
+    return new SinkRecord(topic, 0, keySchema, new Struct(keySchema).put("id", id), null, null, id);
+  }
+
+  @Test
+  void implicit_rejects_topic_that_is_not_a_valid_table_name() {
+    conn.start(implicitProperties(keyspaceName, "orders-v1.raw"));
+
+    assertThatThrownBy(() -> task.start(conn.taskConfigs(1).get(0)))
+        .isInstanceOf(ConfigException.class)
+        .hasMessageContaining("Topic 'orders-v1.raw' cannot be used with mappingMode=IMPLICIT");
+  }
+
+  @Test
+  void implicit_deletes_on_tombstone_first_after_restart() {
+    String topic = newTableName();
+    conn.start(evolvingProperties(topic));
+    runTaskWithRecords(
+        evolveRecord(topic, 1L, evolveValueSchema(false)),
+        evolveRecord(topic, 2L, evolveValueSchema(false)));
+
+    CassandraSinkTask restarted = new CassandraSinkTask();
+    restarted.initialize(mock(SinkTaskContext.class));
+    restarted.start(conn.taskConfigs(1).get(0));
+    try {
+      restarted.put(Collections.singletonList(tombstone(topic, 1L)));
+    } finally {
+      restarted.stop();
+    }
+
+    assertThat(rowById(topic, 1L)).isNull();
+    assertThat(rowById(topic, 2L)).isNotNull();
+  }
+
+  @Test
+  void implicit_skips_tombstone_when_table_does_not_exist() {
+    String topic = newTableName();
+    conn.start(evolvingProperties(topic));
+
+    runTaskWithRecords(tombstone(topic, 1L));
+
+    assertThat(tableMetadata(topic)).isEmpty();
+  }
+
+  @Test
+  void implicit_keeps_row_on_all_null_record_and_deletes_on_tombstone() {
+    String topic = newTableName();
+    conn.start(evolvingProperties(topic));
+    runTaskWithRecords(evolveRecord(topic, 1L, evolveValueSchema(true)));
+
+    Schema older =
+        SchemaBuilder.struct()
+            .field("id", Schema.INT64_SCHEMA)
+            .field("name", Schema.OPTIONAL_STRING_SCHEMA)
+            .build();
+    Schema keySchema = evolveKeySchema();
+    task.put(
+        Collections.singletonList(
+            new SinkRecord(
+                topic,
+                0,
+                keySchema,
+                new Struct(keySchema).put("id", 1L),
+                older,
+                new Struct(older).put("id", 1L),
+                2L)));
+
+    Row kept = rowById(topic, 1L);
+    assertThat(kept.getString("name")).isEqualTo("n1");
+    assertThat(kept.getString("email")).isEqualTo("1@example.com");
+
+    task.put(Collections.singletonList(tombstone(topic, 1L)));
+    assertThat(rowById(topic, 1L)).isNull();
+  }
+
   @Test
   void two_tasks_evolve_same_table_without_failures() throws Exception {
     String topic = newTableName();
