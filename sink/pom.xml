@@ -26,6 +26,12 @@
   <artifactId>kafka-connect-cassandra-sink</artifactId>
   <name>DataStax Apache Cassandra (R) Kafka Sink Connector - Sink</name>
   <description>A Kafka Connect Sink to load records from Kafka topics to Apache Cassandra (R) or DataStax Enterprise (DSE).</description>
+  <properties>
+    <!-- Version reported by CassandraSinkConnector.version() (via version.txt). Defaults to the
+         project version; cloud wrappers override it with their own version so that the connector
+         and task match the cloud release for hot-swap. -->
+    <connector.plugin.version>${project.version}</connector.plugin.version>
+  </properties>
   <dependencies>
     <dependency>
       <groupId>com.datastax.oss</groupId>
