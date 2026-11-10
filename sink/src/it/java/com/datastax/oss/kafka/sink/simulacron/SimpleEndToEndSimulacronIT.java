@@ -386,7 +386,8 @@ class SimpleEndToEndSimulacronIT {
       // swallow
     }
     assertThat(logs.getAllMessagesAsString())
-        .contains("Error inserting/updating row for Kafka record SinkRecord{kafkaOffset=1234")
+        .contains(
+            "Error inserting/updating row for Kafka record from topic mytopic partition 0 offset 1234: ")
         .contains("statement: DELETE FROM ks1.mycounter WHERE a = :a AND b = :b");
   }
 
@@ -444,10 +445,13 @@ class SimpleEndToEndSimulacronIT {
             entry(new TopicPartition("wrongtopic", 1), new OffsetAndMetadata(1L)));
 
     assertThat(logs.getAllMessagesAsString())
-        .contains("Error inserting/updating row for Kafka record SinkRecord{kafkaOffset=1237")
-        .contains("Error decoding/mapping Kafka record SinkRecord{kafkaOffset=1238")
-        .contains("Connector has no configuration for record topic 'wrongtopic'")
-        .contains("Could not parse 'bad key'")
+        .contains(
+            "Error inserting/updating row for Kafka record from topic mytopic partition 0 offset 1237: ")
+        .contains(
+            "Error decoding/mapping Kafka record from topic mytopic partition 1 offset 1238: java.lang.IllegalArgumentException")
+        .contains(
+            "Error decoding/mapping Kafka record from topic wrongtopic partition 1 offset 1: com.datastax.oss.common.sink.ConfigException")
+        .doesNotContain("bad key")
         .contains(
             "statement: INSERT INTO ks1.table1(a,b) VALUES (:a,:b) USING TIMESTAMP :"
                 + SinkUtil.TIMESTAMP_VARNAME);
@@ -486,8 +490,9 @@ class SimpleEndToEndSimulacronIT {
     assertThat(currentOffsets).isEmpty();
 
     assertThat(logs.getAllMessagesAsString())
-        .contains("Error decoding/mapping Kafka record SinkRecord{kafkaOffset=1235")
-        .contains("Could not parse 'bad key'");
+        .contains(
+            "Error decoding/mapping Kafka record from topic mytopic partition 0 offset 1235: java.lang.IllegalArgumentException")
+        .doesNotContain("bad key");
     InstanceState instanceState = task.getInstanceState();
     assertThat(instanceState.getFailedRecordCounter("mytopic", "ks1.table1")).isEqualTo(1);
     assertThat(instanceState.getRecordCounter("mytopic", "ks1.table1")).isEqualTo(2);
@@ -539,8 +544,10 @@ class SimpleEndToEndSimulacronIT {
     assertThat(currentOffsets).isEmpty();
 
     assertThat(logs.getAllMessagesAsString())
-        .contains("Error inserting/updating row for Kafka record SinkRecord{kafkaOffset=1237")
-        .contains("Error inserting/updating row for Kafka record SinkRecord{kafkaOffset=1238")
+        .contains(
+            "Error inserting/updating row for Kafka record from topic mytopic partition 0 offset 1237: ")
+        .contains(
+            "Error inserting/updating row for Kafka record from topic mytopic partition 1 offset 1238: ")
         .contains(
             "statement: INSERT INTO ks1.table1(a,b) VALUES (:a,:b) USING TIMESTAMP :"
                 + SinkUtil.TIMESTAMP_VARNAME);
@@ -736,9 +743,8 @@ class SimpleEndToEndSimulacronIT {
     SinkRecord badRecord = new SinkRecord("unknown", 0, null, 42L, null, 42, 1234L);
     runTaskWithRecords(goodRecord, badRecord);
     assertThat(logs.getAllMessagesAsString())
-        .contains("Error decoding/mapping Kafka record SinkRecord{kafkaOffset=1234")
         .contains(
-            "Connector has no configuration for record topic 'unknown'. Please update the configuration and restart.");
+            "Error decoding/mapping Kafka record from topic unknown partition 0 offset 1234: com.datastax.oss.common.sink.ConfigException");
 
     // Verify that the insert for good1 was issued.
     List<QueryLog> queryList =
@@ -942,8 +948,10 @@ class SimpleEndToEndSimulacronIT {
             entry(new TopicPartition("mytopic", 1), new OffsetAndMetadata(8888L)));
 
     assertThat(logs.getAllMessagesAsString())
-        .contains("Error inserting/updating row for Kafka record SinkRecord{kafkaOffset=1234")
-        .contains("Error inserting/updating row for Kafka record SinkRecord{kafkaOffset=8888");
+        .contains(
+            "Error inserting/updating row for Kafka record from topic mytopic partition 0 offset 1234: ")
+        .contains(
+            "Error inserting/updating row for Kafka record from topic mytopic partition 1 offset 8888: ");
   }
 
   @Test

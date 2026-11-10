@@ -45,6 +45,9 @@ public class KafkaSchema implements AbstractSchema {
    * @return the wrapped schema
    */
   public static KafkaSchema of(Schema schema) {
+    if (schema.name() != null) {
+      return new KafkaSchema(schema);
+    }
     switch (schema.type()) {
       case INT8:
         return INT8;
@@ -97,6 +100,11 @@ public class KafkaSchema implements AbstractSchema {
   @Override
   public AbstractSchema keySchema() {
     return of(schema.keySchema());
+  }
+
+  @Override
+  public String name() {
+    return schema.name();
   }
 
   @Override
