@@ -27,8 +27,11 @@ import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadLocalRandom;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.connect.errors.ConnectException;
+import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.sink.ErrantRecordReporter;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTask;
@@ -46,6 +49,16 @@ public class CassandraSinkTask extends SinkTask {
 
   private Map<TopicPartition, OffsetAndMetadata> failureOffsets;
   private final AbstractSinkTask processor = new SinkTaskProcessorImpl();
+
+  static final long RETRY_BASE_BACKOFF_MS = 1_000;
+  static final long RETRY_MAX_BACKOFF_MS = 60_000;
+  static final int MAX_RETRIES = 10;
+
+  // Set when a failure must not be skipped; put() then asks Connect to retry the batch.
+  private volatile boolean retryBatch;
+  // Exception type only; messages can carry record values.
+  private volatile String retryCause;
+  private int retryAttempts;
 
   // KIP-610 errant record reporter, used to route tolerated write/mapping failures to the DLQ
   private ErrantRecordReporter reporter;
@@ -113,7 +126,43 @@ public class CassandraSinkTask extends SinkTask {
         r -> {
           wrapped.add(new KafkaSinkRecordAdapter(r));
         });
+    retryBatch = false;
     processor.put(wrapped);
+    retryBatchIfNeeded();
+  }
+
+  /**
+   * Asks Connect to redeliver the batch after a jittered, exponential backoff when a failure must
+   * not be skipped, so a failing write is not retried in a tight loop. Fails the task once the
+   * retries are exhausted.
+   */
+  void retryBatchIfNeeded() {
+    if (!retryBatch) {
+      retryAttempts = 0;
+      return;
+    }
+    if (retryAttempts >= MAX_RETRIES) {
+      retryAttempts = 0;
+      throw new ConnectException(
+          String.format(
+              "Failed to write the batch after %d retries (%s); errors.tolerance is none, so the "
+                  + "connector stops instead of skipping records",
+              MAX_RETRIES, retryCause));
+    }
+    long cap = Math.min(RETRY_MAX_BACKOFF_MS, RETRY_BASE_BACKOFF_MS << Math.min(retryAttempts, 16));
+    long backoff = ThreadLocalRandom.current().nextLong(cap / 2, cap + 1);
+    retryAttempts++;
+    log.warn(
+        "Failed to write the batch and errors are not tolerated; retrying it in {} ms (attempt {})",
+        backoff,
+        retryAttempts);
+    context.timeout(backoff);
+    throw new RetriableException("Failed to write the batch; it will be retried");
+  }
+
+  void handleFailure(SinkRecord record, Throwable e, String cql) {
+    ((SinkTaskProcessorImpl) processor)
+        .handleFailure(new KafkaSinkRecordAdapter(record), e, cql, () -> {});
   }
 
   @Override
@@ -161,15 +210,9 @@ public class CassandraSinkTask extends SinkTask {
           ignoreErrors == IgnoreErrorsPolicy.NONE
               || (ignoreErrors == IgnoreErrorsPolicy.DRIVER && !driverFailure);
       if (stall) {
-        TopicPartition topicPartition = new TopicPartition(record.topic(), record.kafkaPartition());
-        long currentOffset = Long.MAX_VALUE;
-        if (failureOffsets.containsKey(topicPartition)) {
-          currentOffset = failureOffsets.get(topicPartition).offset();
-        }
-        if (record.kafkaOffset() < currentOffset) {
-          failureOffsets.put(topicPartition, new OffsetAndMetadata(record.kafkaOffset()));
-          context.offset(topicPartition, record.kafkaOffset());
-        }
+        // Offsets only advance after put() succeeds, so retrying the batch skips nothing.
+        retryCause = e.getClass().getName();
+        retryBatch = true;
       } else if (reporter != null) {
         // Route the record to the DLQ and let its offset advance
         reportFutures.add(reporter.report(record, e));
