@@ -69,6 +69,7 @@ import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTaskContext;
 import org.assertj.core.api.Condition;
@@ -377,7 +378,7 @@ class SimpleEndToEndSimulacronIT {
     SinkRecord record =
         new SinkRecord(
             "mytopic", 0, null, 37, null, value, 1234, 153000987L, TimestampType.CREATE_TIME);
-    runTaskWithRecords(record);
+    assertThatThrownBy(() -> runTaskWithRecords(record)).isInstanceOf(RetriableException.class);
 
     // The log may need a little time to be updated with our error message.
     try {
@@ -431,18 +432,14 @@ class SimpleEndToEndSimulacronIT {
             153000987L,
             TimestampType.CREATE_TIME);
 
-    runTaskWithRecords(record1, record2, record3, record4, record5, record6);
+    assertThatThrownBy(
+            () -> runTaskWithRecords(record1, record2, record3, record4, record5, record6))
+        .isInstanceOf(RetriableException.class);
 
-    // Verify that we get an error offset for the first record that failed in partition 0 (1235)
-    // even though its failure was discovered after 1237. Also, 1238 belongs to a different
-    // partition, so it should be included.
+    // The batch is retried as a whole, so no offset is committed past the failures.
     Map<TopicPartition, OffsetAndMetadata> currentOffsets = new HashMap<>();
     task.preCommit(currentOffsets);
-    assertThat(currentOffsets)
-        .containsOnly(
-            entry(new TopicPartition("mytopic", 0), new OffsetAndMetadata(1235L)),
-            entry(new TopicPartition("mytopic", 1), new OffsetAndMetadata(1238L)),
-            entry(new TopicPartition("wrongtopic", 1), new OffsetAndMetadata(1L)));
+    assertThat(currentOffsets).isEmpty();
 
     assertThat(logs.getAllMessagesAsString())
         .contains(
@@ -741,7 +738,8 @@ class SimpleEndToEndSimulacronIT {
     SinkRecord goodRecord = makeRecord(42, "the answer", 153000987L, 1234);
 
     SinkRecord badRecord = new SinkRecord("unknown", 0, null, 42L, null, 42, 1234L);
-    runTaskWithRecords(goodRecord, badRecord);
+    assertThatThrownBy(() -> runTaskWithRecords(goodRecord, badRecord))
+        .isInstanceOf(RetriableException.class);
     assertThat(logs.getAllMessagesAsString())
         .contains(
             "Error decoding/mapping Kafka record from topic unknown partition 0 offset 1234: com.datastax.oss.common.sink.ConfigException");
@@ -890,7 +888,7 @@ class SimpleEndToEndSimulacronIT {
   @Test
   void fail_batch_request() {
     // Test single topic, multiple Kafka partitions, single C* partition, fail batch request:
-    // single batch statement failure causes failureOffsets for all SinkRecord's in the batch.
+    // single batch statement failure causes the whole Kafka batch to be retried.
     SimulacronUtils.primeTables(simulacron, schema);
     Query good1 = makeQuery(42, "the answer", 153000987000L);
     simulacron.prime(when(good1).then(noRows()));
@@ -917,7 +915,8 @@ class SimpleEndToEndSimulacronIT {
     SinkRecord record2 = makeRecord(1, 42, "the second answer", 153000987000L, 8888);
 
     conn.start(connectorProperties);
-    runTaskWithRecords(record1, record2);
+    assertThatThrownBy(() -> runTaskWithRecords(record1, record2))
+        .isInstanceOf(RetriableException.class);
 
     // Verify that one Batch request was issued, and no EXECUTE requests:
     long batchRequestCount =
@@ -939,13 +938,10 @@ class SimpleEndToEndSimulacronIT {
     assertThat(batchRequestCount).isEqualTo(1L);
     assertThat(executeRequestCount).isEqualTo(0L);
 
-    // Verify that we get error offsets for both records.
+    // The batch is retried as a whole, so no offset is committed past the failures.
     Map<TopicPartition, OffsetAndMetadata> currentOffsets = new HashMap<>();
     task.preCommit(currentOffsets);
-    assertThat(currentOffsets)
-        .containsOnly(
-            entry(new TopicPartition("mytopic", 0), new OffsetAndMetadata(1234L)),
-            entry(new TopicPartition("mytopic", 1), new OffsetAndMetadata(8888L)));
+    assertThat(currentOffsets).isEmpty();
 
     assertThat(logs.getAllMessagesAsString())
         .contains(
